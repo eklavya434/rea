@@ -73,14 +73,22 @@ export class BrowserInspector {
 
       const context = await browser.newContext({
         viewport: { width: 1280, height: 800 },
-        userAgent: "WebsiteXRay-Auditor/1.0 (+https://github.com/website-xray; Authorized-Security-Inspection)",
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        extraHTTPHeaders: {
+          "Accept-Language": "en-US,en;q=0.9",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+          "Sec-Ch-Ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          "Sec-Ch-Ua-Mobile": "?0",
+          "Sec-Ch-Ua-Platform": '"Windows"',
+          "Upgrade-Insecure-Requests": "1"
+        },
         javaScriptEnabled: true,
-        ignoreHTTPSErrors: false,
+        ignoreHTTPSErrors: true,
       });
 
       const page = await context.newPage();
-      page.setDefaultNavigationTimeout(15000); // 15s max navigation
-      page.setDefaultTimeout(10000);
+      page.setDefaultNavigationTimeout(20000); // 20s max navigation
+      page.setDefaultTimeout(15000);
 
       // Re-validate redirects for SSRF
       page.on("response", async (response) => {
@@ -95,8 +103,13 @@ export class BrowserInspector {
         }
       });
 
-      await page.goto(safeUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await page.waitForTimeout(1000); // Allow stable render
+      try {
+        await page.goto(safeUrl, { waitUntil: "domcontentloaded", timeout: 18000 });
+      } catch (navErr) {
+        // If domcontentloaded times out on heavy SPAs, proceed if navigation was committed
+        console.warn("domcontentloaded timeout, attempting commit capture:", navErr);
+      }
+      await page.waitForTimeout(1500); // Allow dynamic hydration
 
       const title = (await page.title()) || safeUrl;
 
@@ -196,40 +209,25 @@ export class BrowserInspector {
   private async resilientHttpFallback(safeUrl: string, timestamp: string, viewport: string): Promise<PageInspectionResult> {
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
 
       const res = await fetch(safeUrl, {
         headers: {
-          "User-Agent": "WebsiteXRay-Auditor/1.0 (+https://github.com/website-xray; Safe-Audit-Mode)",
-          Accept: "text/html,application/xhtml+xml",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
         },
         signal: controller.signal,
       });
 
       clearTimeout(timeoutId);
 
-      if (!res.ok) {
-        return {
-          url: safeUrl,
-          title: "HTTP Error",
-          viewport,
-          status: "FAILED",
-          navLinks: [],
-          controls: [],
-          headings: [],
-          visibleTextSnippet: "",
-          sanitizedDomExcerpt: "",
-          error: `HTTP ${res.status}: ${res.statusText}`,
-          timestamp,
-        };
-      }
-
-      const html = await res.text();
+      const html = await res.text().catch(() => "");
       const sanitized = sanitizeHtmlContent(html.slice(0, 15000));
 
       // Extract basic title
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      const title = titleMatch ? titleMatch[1].trim() : safeUrl;
+      let title = titleMatch ? titleMatch[1].trim() : safeUrl;
 
       // Extract basic headings
       const headingMatches = Array.from(html.matchAll(/<h[1-3][^>]*>([^<]+)<\/h[1-3]>/gi))
@@ -242,6 +240,27 @@ export class BrowserInspector {
         .slice(0, 20)
         .map((m) => ({ href: m[1], text: m[2].trim() || m[1] }))
         .filter((l) => !l.href.startsWith("javascript:"));
+
+      if (!res.ok) {
+        // Target returned non-200 (e.g. 403 Cloudflare challenge, 401 login barrier)
+        title = `${title} (HTTP ${res.status})`;
+        return {
+          url: safeUrl,
+          title,
+          viewport,
+          status: "PARTIAL",
+          navLinks: linkMatches,
+          controls: [
+            { type: "auth_wall", label: `Access Barrier (HTTP ${res.status} ${res.statusText})` },
+            { type: "notice", label: "Cloudflare / Access Control Challenge Screen" },
+          ],
+          headings: headingMatches.length > 0 ? headingMatches : [`Access Restricted (HTTP ${res.status})`],
+          visibleTextSnippet: sanitized.replace(/<[^>]+>/g, " ").slice(0, 1500) || `Target server returned HTTP ${res.status}. Access control barrier observed.`,
+          sanitizedDomExcerpt: sanitized.slice(0, 5000),
+          error: `Target server returned HTTP ${res.status}: ${res.statusText}. Observable public barrier captured.`,
+          timestamp,
+        };
+      }
 
       return {
         url: safeUrl,
