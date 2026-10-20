@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/db";
+import { authorizeProjectAccess } from "@/lib/security/auth";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
+    const auth = await authorizeProjectAccess(req, id);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
     const url = new URL(req.url);
     const format = url.searchParams.get("format") || "markdown";
 

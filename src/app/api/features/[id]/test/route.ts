@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/db";
+import { authorizeProjectAccess } from "@/lib/security/auth";
 import { z } from "zod";
 
 const TestStatusSchema = z.object({
@@ -10,12 +11,6 @@ const TestStatusSchema = z.object({
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const body = await req.json();
-    const parsed = TestStatusSchema.safeParse(body);
-
-    if (!parsed.success) {
-      return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
-    }
 
     const feature = await prisma.feature.findUnique({
       where: { id },
@@ -23,6 +18,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     if (!feature) {
       return NextResponse.json({ error: "Feature not found" }, { status: 404 });
+    }
+
+    const auth = await authorizeProjectAccess(req, feature.projectId);
+    if (!auth.authorized) {
+      return auth.response;
+    }
+
+    const body = await req.json();
+    const parsed = TestStatusSchema.safeParse(body);
+
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
     }
 
     const { status, notes } = parsed.data;
@@ -42,7 +49,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         results: JSON.stringify({
           featureName: feature.name,
           status,
-          notes: notes || "Manual verification checklist assertion updated.",
+          notes: notes || "Verification checklist assertion updated.",
           timestamp: new Date().toISOString(),
         }),
         completedAt: new Date(),

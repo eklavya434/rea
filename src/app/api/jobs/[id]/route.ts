@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/db";
+import { authorizeProjectAccess } from "@/lib/security/auth";
 
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -10,6 +11,12 @@ export async function GET(req: Request, { params }: { params: Promise<{ id: stri
 
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
+    }
+
+    // Verify project authorization for this job
+    const auth = await authorizeProjectAccess(req, job.projectId);
+    if (!auth.authorized) {
+      return auth.response;
     }
 
     return NextResponse.json({

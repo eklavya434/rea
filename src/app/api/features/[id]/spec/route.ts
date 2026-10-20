@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/db";
 import { aiService } from "@/lib/ai/provider";
+import { authorizeProjectAccess } from "@/lib/security/auth";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -12,6 +13,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     if (!feature) {
       return NextResponse.json({ error: "Feature not found" }, { status: 404 });
+    }
+
+    // Verify project authorization
+    const auth = await authorizeProjectAccess(req, feature.projectId);
+    if (!auth.authorized) {
+      return auth.response;
     }
 
     // Generate Specification via AI or Heuristics

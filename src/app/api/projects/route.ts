@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import prisma from "@/lib/db";
 import { validateTargetUrl } from "@/lib/security/ssrf";
+import { authenticateRequest } from "@/lib/security/auth";
 import { z } from "zod";
 
 const CreateProjectSchema = z.object({
@@ -13,7 +14,12 @@ const CreateProjectSchema = z.object({
   }),
 });
 
-export async function GET() {
+export async function GET(req: Request) {
+  const auth = authenticateRequest(req);
+  if (!auth.authenticated) {
+    return NextResponse.json({ error: auth.error || "Unauthorized" }, { status: auth.statusCode || 401 });
+  }
+
   try {
     const projects = await prisma.project.findMany({
       orderBy: { createdAt: "desc" },
@@ -37,6 +43,11 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const auth = authenticateRequest(req);
+  if (!auth.authenticated) {
+    return NextResponse.json({ error: auth.error || "Unauthorized" }, { status: auth.statusCode || 401 });
+  }
+
   try {
     const body = await req.json();
     const validation = CreateProjectSchema.safeParse(body);
@@ -47,7 +58,7 @@ export async function POST(req: Request) {
 
     const { name, targetUrl, analysisMode, description } = validation.data;
 
-    // SSRF Validation
+    // Strict Pre-Flight SSRF Validation
     const ssrfResult = await validateTargetUrl(targetUrl);
     if (!ssrfResult.isValid) {
       return NextResponse.json(
