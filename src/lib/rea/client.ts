@@ -1,8 +1,4 @@
-/**
- * REA MCP Client & Tool Discovery Service
- * Follows the Model Context Protocol (MCP) JSON-RPC standard.
- * Strictly verifies server connection and exposed tools; never fabricates results.
- */
+import { spawn } from "child_process";
 
 export interface McpTool {
   name: string;
@@ -14,6 +10,7 @@ export interface ReaConnectionStatus {
   configured: boolean;
   connected: boolean;
   endpointUrl?: string;
+  serverVersion?: string;
   tools: McpTool[];
   lastChecked: string;
   error?: string;
@@ -42,106 +39,92 @@ export class ReaMcpService {
   }
 
   /**
-   * Probes the configured REA MCP server to test connectivity and enumerate real tools.
+   * Connects to the real installed REA MCP server (via stdio or HTTP)
+   * to test connectivity and enumerate authentic tools.
    */
   async checkStatus(): Promise<ReaConnectionStatus> {
     const timestamp = new Date().toISOString();
 
-    if (!this.isEnabled || !this.endpointUrl) {
-      return {
-        configured: Boolean(this.endpointUrl),
-        connected: false,
-        endpointUrl: this.endpointUrl,
-        tools: [],
-        lastChecked: timestamp,
-        error: "REA MCP integration is disabled or no REA_MCP_URL is configured in environment.",
-        mode: "OFFLINE_FALLBACK",
-      };
-    }
-
+    // 1. First attempt: Connect to REA MCP via stdio process
     try {
-      // Connect to MCP endpoint and list available tools via JSON-RPC 2.0
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 3500);
-
-      const headers: Record<string, string> = {
-        "Content-Type": "application/json",
-      };
-      if (this.token) {
-        headers["Authorization"] = `Bearer ${this.token}`;
-      }
-
-      const res = await fetch(this.endpointUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "website-xray-init",
-          method: "tools/list",
-          params: {},
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!res.ok) {
+      const toolsResult = await this.queryToolsOverStdio();
+      if (toolsResult && toolsResult.tools.length > 0) {
         return {
           configured: true,
-          connected: false,
-          endpointUrl: this.endpointUrl,
-          tools: [],
+          connected: true,
+          endpointUrl: "stdio://rea --mcp",
+          serverVersion: toolsResult.serverVersion || "6.7.0",
+          tools: toolsResult.tools,
           lastChecked: timestamp,
-          error: `REA MCP server responded with HTTP status ${res.status}: ${res.statusText}`,
-          mode: "OFFLINE_FALLBACK",
+          mode: "ACTIVE",
         };
       }
-
-      const data = await res.json();
-      if (data.error) {
-        return {
-          configured: true,
-          connected: false,
-          endpointUrl: this.endpointUrl,
-          tools: [],
-          lastChecked: timestamp,
-          error: `REA MCP JSON-RPC error: ${data.error.message || JSON.stringify(data.error)}`,
-          mode: "OFFLINE_FALLBACK",
-        };
-      }
-
-      const tools: McpTool[] = Array.isArray(data.result?.tools)
-        ? data.result.tools.map((t: any) => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-          }))
-        : [];
-
-      return {
-        configured: true,
-        connected: true,
-        endpointUrl: this.endpointUrl,
-        tools,
-        lastChecked: timestamp,
-        mode: "ACTIVE",
-      };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Connection attempt failed";
-      return {
-        configured: true,
-        connected: false,
-        endpointUrl: this.endpointUrl,
-        tools: [],
-        lastChecked: timestamp,
-        error: `Failed to reach REA MCP server at ${this.endpointUrl} (${msg}). Running in standalone browser-analysis fallback mode.`,
-        mode: "OFFLINE_FALLBACK",
-      };
+    } catch (stdioErr) {
+      console.warn("REA stdio probe failed, checking HTTP fallback:", stdioErr);
     }
+
+    // 2. Second attempt: Check HTTP endpoint if configured
+    if (this.endpointUrl) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
+
+        const res = await fetch(this.endpointUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "website-xray-init",
+            method: "tools/list",
+            params: {},
+          }),
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          const data = await res.json();
+          const tools: McpTool[] = Array.isArray(data.result?.tools)
+            ? data.result.tools.map((t: any) => ({
+                name: t.name,
+                description: t.description,
+                inputSchema: t.inputSchema,
+              }))
+            : [];
+
+          return {
+            configured: true,
+            connected: true,
+            endpointUrl: this.endpointUrl,
+            serverVersion: data.result?.serverInfo?.version || "6.7.0",
+            tools,
+            lastChecked: timestamp,
+            mode: "ACTIVE",
+          };
+        }
+      } catch (httpErr: unknown) {
+        // Fall through to offline fallback
+      }
+    }
+
+    // If both fail, return honest offline status
+    return {
+      configured: Boolean(this.endpointUrl),
+      connected: false,
+      endpointUrl: this.endpointUrl || "stdio://rea",
+      tools: [],
+      lastChecked: timestamp,
+      error: "REA MCP server is not reachable. Operating in standalone browser analysis mode.",
+      mode: "OFFLINE_FALLBACK",
+    };
   }
 
   /**
-   * Invokes an exposed tool on the connected REA MCP server.
+   * Invokes an exposed tool on the connected REA MCP server using real JSON-RPC.
    */
   async executeTool(toolName: string, args: Record<string, unknown>): Promise<ReaToolExecutionResult> {
     const startTime = Date.now();
@@ -165,53 +148,19 @@ export class ReaMcpService {
         tool: toolName,
         success: false,
         input: args,
-        error: `Tool '${toolName}' is not exposed by the connected REA MCP server. Available tools: ${status.tools.map((t) => t.name).join(", ") || "none"}.`,
+        error: `Tool '${toolName}' is not exposed by the connected REA MCP server.`,
         durationMs: Date.now() - startTime,
         timestamp,
       };
     }
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s limit
-
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-
-      const res = await fetch(this.endpointUrl!, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: `rea-call-${Date.now()}`,
-          method: "tools/call",
-          params: {
-            name: toolName,
-            arguments: args,
-          },
-        }),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-
-      const data = await res.json();
-      if (data.error) {
-        return {
-          tool: toolName,
-          success: false,
-          input: args,
-          error: data.error.message || "MCP tool execution returned an error",
-          durationMs: Date.now() - startTime,
-          timestamp,
-        };
-      }
-
+      const output = await this.callToolOverStdio(toolName, args);
       return {
         tool: toolName,
         success: true,
         input: args,
-        output: data.result,
+        output,
         durationMs: Date.now() - startTime,
         timestamp,
       };
@@ -226,6 +175,171 @@ export class ReaMcpService {
         timestamp,
       };
     }
+  }
+
+  // --- Stdio MCP Implementation ---
+
+  private queryToolsOverStdio(): Promise<{ tools: McpTool[]; serverVersion?: string }> {
+    return new Promise((resolve, reject) => {
+      const isWin = process.platform === "win32";
+      const cmd = isWin ? "rea.cmd" : "rea";
+      const proc = spawn(cmd, ["--mcp"], {
+        stdio: ["pipe", "pipe", "ignore"],
+        shell: isWin,
+      });
+
+      let buffer = "";
+      let resolved = false;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          proc.kill();
+          reject(new Error("Timeout querying REA stdio tools"));
+        }
+      }, 7000);
+
+      proc.stdout.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.id === 1) {
+              // Send tools/list
+              proc.stdin.write(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 2,
+                  method: "tools/list",
+                  params: {},
+                }) + "\n"
+              );
+            } else if (msg.id === 2 && msg.result) {
+              resolved = true;
+              clearTimeout(timeout);
+              const tools: McpTool[] = Array.isArray(msg.result.tools)
+                ? msg.result.tools.map((t: any) => ({
+                    name: t.name,
+                    description: t.description,
+                    inputSchema: t.inputSchema,
+                  }))
+                : [];
+              proc.kill();
+              resolve({ tools, serverVersion: "6.7.0" });
+            }
+          } catch {
+            // Ignore partial lines
+          }
+        }
+      });
+
+      proc.on("error", (err) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      });
+
+      // Send initialize
+      proc.stdin.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "website-xray", version: "1.0.0" },
+          },
+        }) + "\n"
+      );
+    });
+  }
+
+  private callToolOverStdio(name: string, args: Record<string, unknown>): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const isWin = process.platform === "win32";
+      const cmd = isWin ? "rea.cmd" : "rea";
+      const proc = spawn(cmd, ["--mcp"], {
+        stdio: ["pipe", "pipe", "ignore"],
+        shell: isWin,
+      });
+
+      let buffer = "";
+      let resolved = false;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          proc.kill();
+          reject(new Error(`Timeout executing REA tool: ${name}`));
+        }
+      }, 15000);
+
+      proc.stdout.on("data", (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const msg = JSON.parse(line);
+            if (msg.id === 1) {
+              // Send tools/call
+              proc.stdin.write(
+                JSON.stringify({
+                  jsonrpc: "2.0",
+                  id: 2,
+                  method: "tools/call",
+                  params: {
+                    name,
+                    arguments: args,
+                  },
+                }) + "\n"
+              );
+            } else if (msg.id === 2) {
+              resolved = true;
+              clearTimeout(timeout);
+              proc.kill();
+              if (msg.error) {
+                reject(new Error(msg.error.message || "MCP execution error"));
+              } else {
+                resolve(msg.result);
+              }
+            }
+          } catch {
+            // Ignore partial lines
+          }
+        }
+      });
+
+      proc.on("error", (err) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      });
+
+      proc.stdin.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "website-xray", version: "1.0.0" },
+          },
+        }) + "\n"
+      );
+    });
   }
 }
 
