@@ -1,0 +1,30 @@
+node_modules
+/.next/
+/out/
+/build
+.DS_Store
+*.pem
+
+# Prisma / DB
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+/prisma/*.db
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Screenshots & Cache
+/public/captures/
+/test-results/
+/coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

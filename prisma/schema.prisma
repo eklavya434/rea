@@ -1,0 +1,152 @@
+// Prisma Schema for Website X-Ray
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  createdAt DateTime  @default(now())
+  projects  Project[]
+}
+
+model Project {
+  id           String        @id @default(cuid())
+  ownerId      String?
+  owner        User?         @relation(fields: [ownerId], references: [id], onDelete: SetNull)
+  name         String
+  description  String?
+  targetUrl    String
+  analysisMode String        @default("WEBSITE_INTERFACE") // WEBSITE_INTERFACE | REA_ASSISTED | HYBRID
+  status       String        @default("PENDING") // PENDING | ANALYZING | COMPLETED | FAILED
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  pages        Page[]
+  features     Feature[]
+  evidence     Evidence[]
+  jobs         AnalysisJob[]
+  testRuns     TestRun[]
+  reports      Report[]
+
+  @@index([ownerId])
+  @@index([status])
+}
+
+model Page {
+  id               String     @id @default(cuid())
+  projectId        String
+  project          Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  url              String
+  title            String?
+  viewport         String?    // e.g. "1280x800"
+  inspectionStatus String     @default("PENDING") // PENDING | SUCCESS | FAILED
+  inspectedAt      DateTime?
+  errorSummary     String?
+  screenshotPath   String?
+  evidence         Evidence[]
+  createdAt        DateTime   @default(now())
+
+  @@index([projectId])
+}
+
+model Evidence {
+  id               String    @id @default(cuid())
+  projectId        String
+  project          Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  pageId           String?
+  page             Page?     @relation(fields: [pageId], references: [id], onDelete: SetNull)
+  featureId        String?
+  feature          Feature?  @relation(fields: [featureId], references: [id], onDelete: SetNull)
+  sourceType       String    // DOM_SNIPPET | SCREENSHOT | INTERACTION | NETWORK_PUBLIC | REA_TOOL | MANUAL
+  sourceReference  String    // e.g. "Page: /login, Element: button#submit" or REA tool name
+  sanitisedContent String    // Sanitized text/HTML/JSON
+  metadata         String?   // JSON string of dimensions, attributes, tool params
+  confidence       String    @default("OBSERVED") // OBSERVED | INFERRED | UNCERTAIN
+  createdAt        DateTime  @default(now())
+
+  @@index([projectId])
+  @@index([pageId])
+  @@index([featureId])
+}
+
+model Feature {
+  id                   String           @id @default(cuid())
+  projectId            String
+  project              Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name                 String
+  description          String
+  category             String           // NAVIGATION | SEARCH | FILTERING | FORM | DATA_DISPLAY | AUTH_UI | RESPONSIVE
+  observedBehaviour    String
+  assumptions          String?
+  confidence           String           @default("HIGH") // HIGH | MEDIUM | LOW
+  implementationStatus String           @default("NOT_STARTED") // NOT_STARTED | IN_PROGRESS | IMPLEMENTED
+  testStatus           String           @default("UNTESTED") // UNTESTED | PASSED | FAILED
+  evidence             Evidence[]
+  implementations      Implementation[]
+  testRuns             TestRun[]
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+
+  @@index([projectId])
+  @@index([category])
+}
+
+model AnalysisJob {
+  id           String    @id @default(cuid())
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  jobType      String    // BROWSER_INSPECTION | FEATURE_EXTRACTION | REA_PROBE | FULL_PIPELINE
+  status       String    @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
+  progress     Int       @default(0) // 0-100
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+  errorSummary String?
+  logs         String?   // JSON array of timestamped step entries
+
+  @@index([projectId])
+  @@index([status])
+}
+
+model Implementation {
+  id             String    @id @default(cuid())
+  featureId      String
+  feature        Feature   @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  specification  String    // Markdown / JSON specification
+  generatedFiles String?   // JSON object mapping file paths to code snippets
+  status         String    @default("SPEC_GENERATED") // SPEC_GENERATED | TASK_EXPORTED | CODE_READY
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([featureId])
+}
+
+model TestRun {
+  id          String    @id @default(cuid())
+  projectId   String
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  featureId   String?
+  feature     Feature?  @relation(fields: [featureId], references: [id], onDelete: SetNull)
+  status      String    @default("PENDING") // PENDING | RUNNING | PASSED | FAILED
+  results     String    // JSON array of test assertions and visual diff metrics
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  @@index([projectId])
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  format    String   // MARKDOWN | JSON
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+}
